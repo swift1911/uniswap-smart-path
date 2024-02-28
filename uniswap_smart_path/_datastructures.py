@@ -27,7 +27,6 @@ from web3.types import (
 
 from ._utilities import to_wei
 
-
 logger = logging.getLogger(__name__)
 codec = RouterCodec()
 
@@ -67,8 +66,11 @@ PathList = TypeVar('PathList', V2PathList, V3PathList)
 
 class PoolPath(Protocol[OrderedPool, PathList]):
     pools: Sequence[OrderedPool]
+
     def get_path(self) -> PathList: ...
+
     def to_dict(self) -> Dict[str, PathList]: ...
+
     async def get_amount_out(self, amount_in: Wei) -> Wei: ...
 
 
@@ -122,7 +124,7 @@ class V3PoolPath(PoolPath[V3OrderedPool, V3PathList]):
     async def get_amount_out(self, amount_in: Wei) -> Wei:
         encoded_path = codec.encode.v3_path("V3_SWAP_EXACT_IN", self.get_path())
         quote = await self.contract.functions.quoteExactInput(encoded_path, amount_in).call()
-        return to_wei(quote[0])
+        return to_wei(quote[0] if isinstance(quote, list) else quote)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}: {self.path}"
