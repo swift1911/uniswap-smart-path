@@ -4,15 +4,18 @@ import logging
 from typing import (
     Any,
     cast,
+    Dict,
     List,
     Optional,
     Sequence,
     Tuple,
+    Union,
 )
 
 from web3 import (
     AsyncHTTPProvider,
     AsyncWeb3,
+    Web3,
 )
 from web3.contract import AsyncContract
 from web3.types import (
@@ -32,10 +35,12 @@ from ._constants import (
     uniswapv3_factory_address,
     uniswapv3_quoter_abi,
     uniswapv3_quoter_address,
+    uniswapv4_quoter_abi,
     v3_pool_fees,
     weight_combinations,
 )
 from ._datastructures import (
+    codec,
     MixedWeightedPath,
     RouterFunction,
     Token,
@@ -43,6 +48,9 @@ from ._datastructures import (
     V2PoolPath,
     V3OrderedPool,
     V3PoolPath,
+    V4OrderedPool,
+    V4PoolConfig,
+    V4PoolPath,
     WeightedPath,
     WeightedPathResult,
 )
@@ -60,6 +68,7 @@ class SmartPath:
             chain_id: int = 1,
             with_v2: bool = True,
             with_v3: bool = True,
+            with_v4: bool = False,
             **kwargs: Any) -> None:
         if with_gas_estimate:
             raise NotImplementedError("Gas is not yet estimated")
@@ -67,6 +76,7 @@ class SmartPath:
         self.chain_id = chain_id
         self.with_v2 = with_v2
         self.with_v3 = with_v3
+        self.with_v4 = with_v4
 
         self.pivots = kwargs.get("pivot_tokens") or pivot_tokens[self.chain_id]
 
@@ -88,6 +98,15 @@ class SmartPath:
 
             v3_factory = w3.to_checksum_address(kwargs.get("v3_factory") or uniswapv3_factory_address)
             self.factoryv3 = self.w3.eth.contract(v3_factory, abi=kwargs.get("v3_factory_abi") or uniswapv3_factory_abi)
+
+        if self.with_v4:
+            v4_quoter = w3.to_checksum_address(kwargs.get("v4_quoter"))
+            self.v4_quoter = self.w3.eth.contract(
+                v4_quoter,
+                abi=kwargs.get("v4_quoter_abi") or uniswapv4_quoter_abi,
+            )
+            V4PoolPath.contract = self.v4_quoter
+            self.v4_pools = self._normalize_v4_pools(kwargs.get("v4_pools") or ())
 
     @classmethod
     async def create(
@@ -163,6 +182,10 @@ class SmartPath:
         * v2_factory: str - v2 factory address
         * v3_quoter: str - v3 quoter address
         * v3_factory: str - v3 factory address
+        * v4_quoter: str - v4 quoter address
+        * v4_quoter_abi: Optional[str] - custom v4 quoter ABI
+        * v4_pools: Sequence[Dict[str, Any]] - v4 pool definitions with currency_0, currency_1, fee, tick_spacing,
+            optional hooks and hook_data
 
         :param w3: a valid AsyncWeb3 instance (if no rpc endpoint is given)
         :param rpc_endpoint: an rpc endpoint address (if no w3 instance is given)
@@ -182,8 +205,9 @@ class SmartPath:
 
         with_v2 = kwargs.get("v2_router") and kwargs.get("v2_factory")
         with_v3 = kwargs.get("v3_quoter") and kwargs.get("v3_factory")
-        if not with_v2 and not with_v3:
-            raise SmartPathException("Must provide v2 and/or v3 addresses")
+        with_v4 = kwargs.get("v4_quoter") and kwargs.get("v4_pools")
+        if not with_v2 and not with_v3 and not with_v4:
+            raise SmartPathException("Must provide v2, v3, and/or v4 configuration")
 
         return cls(
             _w3,
@@ -191,13 +215,54 @@ class SmartPath:
             _chain_id,
             with_v2=bool(with_v2),
             with_v3=bool(with_v3),
+            with_v4=bool(with_v4),
             pivot_tokens=_pivots,
             v3_pool_fees=kwargs.get("v3_pool_fees"),
             v2_router=kwargs.get("v2_router"),
             v2_factory=kwargs.get("v2_factory"),
             v3_quoter=kwargs.get("v3_quoter"),
             v3_factory=kwargs.get("v3_factory"),
+            v4_quoter=kwargs.get("v4_quoter"),
+            v4_quoter_abi=kwargs.get("v4_quoter_abi"),
+            v4_pools=kwargs.get("v4_pools"),
         )
+
+    @staticmethod
+    def _parse_hook_data(raw_hook_data: Union[bytes, str, None]) -> bytes:
+        if raw_hook_data is None:
+            return b""
+        if isinstance(raw_hook_data, bytes):
+            return raw_hook_data
+        return Web3.to_bytes(hexstr=raw_hook_data)
+
+    @classmethod
+    def _normalize_v4_pools(cls, v4_pools: Sequence[Union[V4PoolConfig, Dict[str, Any]]]) -> Tuple[V4PoolConfig, ...]:
+        normalized: List[V4PoolConfig] = []
+        for pool in v4_pools:
+            if isinstance(pool, V4PoolConfig):
+                normalized.append(pool)
+                continue
+
+            hooks = pool.get("hooks") or "0x0000000000000000000000000000000000000000"
+            hook_data = cls._parse_hook_data(pool.get("hook_data"))
+            pool_key = codec.encode.v4_pool_key(
+                pool["currency_0"],
+                pool["currency_1"],
+                pool["fee"],
+                pool["tick_spacing"],
+                hooks,
+            )
+            normalized.append(
+                V4PoolConfig(
+                    currency_0=pool_key["currency_0"],
+                    currency_1=pool_key["currency_1"],
+                    fee=pool_key["fee"],
+                    tick_spacing=pool_key["tick_spacing"],
+                    hooks=pool_key["hooks"],
+                    hook_data=hook_data,
+                )
+            )
+        return tuple(normalized)
 
     @staticmethod
     async def _get_pivot_tokens(pivots: Sequence[str], w3: AsyncWeb3) -> Tuple[Token, ...]:
@@ -332,6 +397,57 @@ class SmartPath:
         return v3_path_list
 
     @staticmethod
+    def _v4_pool_matches(token_in: Token, token_out: Token, pool: V4PoolConfig) -> bool:
+        return {token_in.address, token_out.address} == {pool.currency_0, pool.currency_1}
+
+    @staticmethod
+    def _build_v4_ordered_pool(token_in: Token, token_out: Token, pool: V4PoolConfig) -> V4OrderedPool:
+        return V4OrderedPool(
+            token_in=token_in,
+            pool_fee=pool.fee,
+            tick_spacing=pool.tick_spacing,
+            hooks=pool.hooks,
+            hook_data=pool.hook_data,
+            token_out=token_out,
+        )
+
+    def _build_v4_path_list(self, token_in: Token, token_out: Token) -> List[V4PoolPath]:
+        v4_path_list: List[V4PoolPath] = []
+        if not self.with_v4:
+            return v4_path_list
+
+        filtered_pivots = [pivot for pivot in self.pivots if pivot not in (token_in, token_out)]
+
+        direct_pools = [
+            pool for pool in self.v4_pools
+            if self._v4_pool_matches(token_in, token_out, pool)
+        ]
+        for pool in direct_pools:
+            v4_path_list.append(V4PoolPath((self._build_v4_ordered_pool(token_in, token_out, pool),)))
+
+        for pivot_token in filtered_pivots:
+            pools_in = [
+                pool for pool in self.v4_pools
+                if self._v4_pool_matches(token_in, pivot_token, pool)
+            ]
+            pools_out = [
+                pool for pool in self.v4_pools
+                if self._v4_pool_matches(pivot_token, token_out, pool)
+            ]
+            for pool_in in pools_in:
+                for pool_out in pools_out:
+                    v4_path_list.append(
+                        V4PoolPath(
+                            (
+                                self._build_v4_ordered_pool(token_in, pivot_token, pool_in),
+                                self._build_v4_ordered_pool(pivot_token, token_out, pool_out),
+                            )
+                        )
+                    )
+
+        return v4_path_list
+
+    @staticmethod
     def _filter_irrelevant_low_values(
             mixed_weighted_paths: List[MixedWeightedPath],
             best_value: Wei) -> List[MixedWeightedPath]:
@@ -373,6 +489,7 @@ class SmartPath:
             self._build_v2_path_list(token_in, token_out),
             self._build_v3_path_list(token_in, token_out),
         )
+        v4_pool_paths = self._build_v4_path_list(token_in, token_out)
 
         v2_mixed_paths = [
             MixedWeightedPath(
@@ -384,43 +501,54 @@ class SmartPath:
                 (WeightedPath(RouterFunction.V3_SWAP_EXACT_IN, pool_path, 100),)
             ) for pool_path in v3_pool_paths
         ]
+        v4_mixed_paths = [
+            MixedWeightedPath(
+                (WeightedPath(RouterFunction.V4_SWAP_EXACT_IN, pool_path, 100),)
+            ) for pool_path in v4_pool_paths
+        ]
 
         computing_value_coros = [path.compute_path_values(amount) for path in v2_mixed_paths]
         computing_value_coros.extend([path.compute_path_values(amount) for path in v3_mixed_paths])
+        computing_value_coros.extend([path.compute_path_values(amount) for path in v4_mixed_paths])
         await asyncio.gather(*computing_value_coros)
 
         v2_mixed_paths.sort(key=lambda mp: mp.total_value, reverse=True)
         v3_mixed_paths.sort(key=lambda mp: mp.total_value, reverse=True)
+        v4_mixed_paths.sort(key=lambda mp: mp.total_value, reverse=True)
 
         best_value = max(
             v2_mixed_paths[0].total_value if len(v2_mixed_paths) > 0 else 0,
             v3_mixed_paths[0].total_value if len(v3_mixed_paths) > 0 else 0,
+            v4_mixed_paths[0].total_value if len(v4_mixed_paths) > 0 else 0,
         )
 
         v2_mixed_paths = self._filter_irrelevant_low_values(v2_mixed_paths, Wei(best_value))
         logger.debug(f"V2 Paths: {v2_mixed_paths}")
         v3_mixed_paths = self._filter_irrelevant_low_values(v3_mixed_paths, Wei(best_value))
         logger.debug(f"V3 Paths: {v3_mixed_paths}")
+        v4_mixed_paths = self._filter_irrelevant_low_values(v4_mixed_paths, Wei(best_value))
+        logger.debug(f"V4 Paths: {v4_mixed_paths}")
 
-        if len(v2_mixed_paths) == len(v3_mixed_paths) == 0:
+        best_paths: List[MixedWeightedPath] = []
+        if v2_mixed_paths:
+            best_paths.append(v2_mixed_paths[0])
+        if v3_mixed_paths:
+            best_paths.append(v3_mixed_paths[0])
+        if v4_mixed_paths:
+            best_paths.append(v4_mixed_paths[0])
+
+        if len(best_paths) == 0:
             return ()
-        elif len(v3_mixed_paths) == 0:
-            return v2_mixed_paths[0].output()
-        elif len(v2_mixed_paths) == 0:
-            return v3_mixed_paths[0].output()
-        else:
-            if v2_mixed_paths[0].total_value > v3_mixed_paths[0].total_value:
-                lower_value_path = v3_mixed_paths[0]
-                higher_value_path = v2_mixed_paths[0]
-            else:
-                lower_value_path = v2_mixed_paths[0]
-                higher_value_path = v3_mixed_paths[0]
+        if len(best_paths) == 1:
+            return best_paths[0].output()
 
-            all_mixed_paths = self._get_all_mixed_path(lower_value_path, higher_value_path)
-            computing_value_coros = [path.compute_path_values(amount) for path in all_mixed_paths]
-            await asyncio.gather(*computing_value_coros)
-            all_mixed_paths.extend([v2_mixed_paths[0], v3_mixed_paths[0]])
-            all_mixed_paths.sort(key=lambda mp: mp.total_value, reverse=True)
-            logger.debug(f"All mixed paths: {all_mixed_paths}")
+        best_paths.sort(key=lambda mp: mp.total_value, reverse=True)
+        higher_value_path, lower_value_path = best_paths[0], best_paths[1]
+        all_mixed_paths = self._get_all_mixed_path(lower_value_path, higher_value_path)
+        computing_value_coros = [path.compute_path_values(amount) for path in all_mixed_paths]
+        await asyncio.gather(*computing_value_coros)
+        all_mixed_paths.extend(best_paths)
+        all_mixed_paths.sort(key=lambda mp: mp.total_value, reverse=True)
+        logger.debug(f"All mixed paths: {all_mixed_paths}")
 
-            return all_mixed_paths[0].output()
+        return all_mixed_paths[0].output()

@@ -17,6 +17,7 @@ from typing import (
 )
 
 from uniswap_universal_router_decoder import RouterCodec
+from uniswap_universal_router_decoder._encoder import PathKey
 from web3 import AsyncWeb3
 from web3.contract import AsyncContract
 from web3.exceptions import Web3Exception
@@ -44,6 +45,8 @@ class RouterFunction(Enum):
     V3_SWAP_EXACT_OUT = "V3_SWAP_EXACT_OUT"
     V2_SWAP_EXACT_IN = "V2_SWAP_EXACT_IN"
     V2_SWAP_EXACT_OUT = "V2_SWAP_EXACT_OUT"
+    V4_SWAP_EXACT_IN = "V4_SWAP_EXACT_IN"
+    V4_SWAP_EXACT_OUT = "V4_SWAP_EXACT_OUT"
 
 
 @dataclass(frozen=True)
@@ -59,10 +62,31 @@ class V3OrderedPool:
     token_out: Token
 
 
-OrderedPool = TypeVar('OrderedPool', V2OrderedPool, V3OrderedPool)
+@dataclass(frozen=True)
+class V4OrderedPool:
+    token_in: Token
+    pool_fee: int
+    tick_spacing: int
+    hooks: ChecksumAddress
+    hook_data: bytes
+    token_out: Token
+
+
+@dataclass(frozen=True)
+class V4PoolConfig:
+    currency_0: ChecksumAddress
+    currency_1: ChecksumAddress
+    fee: int
+    tick_spacing: int
+    hooks: ChecksumAddress
+    hook_data: bytes = b""
+
+
+OrderedPool = TypeVar('OrderedPool', V2OrderedPool, V3OrderedPool, V4OrderedPool)
 V2PathList = Tuple[ChecksumAddress, ...]
 V3PathList = Tuple[Union[int, ChecksumAddress], ...]
-PathList = TypeVar('PathList', V2PathList, V3PathList)
+V4PathList = Tuple[PathKey, ...]
+PathList = TypeVar('PathList', V2PathList, V3PathList, V4PathList)
 
 
 class PoolPath(Protocol[OrderedPool, PathList]):
@@ -128,6 +152,47 @@ class V3PoolPath(PoolPath[V3OrderedPool, V3PathList]):
         return f"{self.__class__.__name__}: {self.path}"
 
 
+class V4PoolPath(PoolPath[V4OrderedPool, V4PathList]):
+    contract: AsyncContract = AsyncWeb3().eth.contract(AsyncWeb3.to_checksum_address("0" * 40))
+
+    def __init__(self, pools: Sequence[V4OrderedPool]) -> None:
+        self.pools = pools
+        self.currency_in = pools[0].token_in.address
+        self.path = self._build_path()
+
+    def get_path(self) -> V4PathList:
+        return self.path
+
+    def _build_path(self) -> V4PathList:
+        path: List[PathKey] = []
+        for pool in self.pools:
+            path.append(
+                codec.encode.v4_path_key(
+                    pool.token_out.address,
+                    pool.pool_fee,
+                    pool.tick_spacing,
+                    pool.hooks,
+                    pool.hook_data,
+                )
+            )
+        return tuple(path)
+
+    def to_dict(self) -> Dict[str, Union[ChecksumAddress, V4PathList]]:
+        return {
+            "currency_in": self.currency_in,
+            "path": self.get_path(),
+        }
+
+    async def get_amount_out(self, amount_in: Wei) -> Wei:
+        path_keys = [tuple(path_key.values()) for path_key in self.get_path()]
+        quote = await self.contract.functions.quoteExactInput(self.currency_in, path_keys, amount_in).call()
+        amount_out = quote[0] if isinstance(quote, (list, tuple)) else quote
+        return to_wei(amount_out)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}: {self.currency_in} -> {self.path}"
+
+
 @dataclass(frozen=True)
 class WeightedPath:
     router_function: RouterFunction
@@ -141,11 +206,12 @@ class WeightedPath:
         return result
 
 
-class WeightedPathResult(TypedDict):
+class WeightedPathResult(TypedDict, total=False):
     function: str
     path: PathList  # type: ignore
     weight: int
     estimate: Wei
+    currency_in: ChecksumAddress
 
 
 class MixedWeightedPath:

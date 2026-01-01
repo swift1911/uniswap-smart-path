@@ -18,6 +18,18 @@ uniswapv3_quoter_address = Web3.to_checksum_address("0x61fFE014bA17989E743c5F6cB
 uniswapv3_quoter_abi = '[{"inputs":[{"internalType":"bytes","name":"path","type":"bytes"},{"internalType":"uint256","name":"amountIn","type":"uint256"}],"name":"quoteExactInput","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint160[]","name":"sqrtPriceX96AfterList","type":"uint160[]"},{"internalType":"uint32[]","name":"initializedTicksCrossedList","type":"uint32[]"},{"internalType":"uint256","name":"gasEstimate","type":"uint256"}],"stateMutability":"nonpayable","type":"function"}]'  # noqa
 uniswapv3_factory_address = Web3.to_checksum_address("0x1F98431c8aD98523631AE4a59f267346ea31F984")
 uniswapv3_factory_abi = '[{"inputs":[{"internalType":"address","name":"","type":"address"},{"internalType":"address","name":"","type":"address"},{"internalType":"uint24","name":"","type":"uint24"}],"name":"getPool","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}]'  # noqa
+uniswapv4_quoter_abi = (
+    '[{"inputs":[{"internalType":"address","name":"currencyIn","type":"address"},'
+    '{"components":[{"internalType":"address","name":"intermediateCurrency","type":"address"},'
+    '{"internalType":"uint24","name":"fee","type":"uint24"},'
+    '{"internalType":"int24","name":"tickSpacing","type":"int24"},'
+    '{"internalType":"address","name":"hooks","type":"address"},'
+    '{"internalType":"bytes","name":"hookData","type":"bytes"}],'
+    '"internalType":"struct PathKey[]","name":"path","type":"tuple[]"},'
+    '{"internalType":"uint256","name":"amountIn","type":"uint256"}],'
+    '"name":"quoteExactInput","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],'
+    '"stateMutability":"view","type":"function"}]'
+)
 
 pivot_tokens: Dict[int, Tuple[Token, ...]] = {
     1: (  # Ethereum
