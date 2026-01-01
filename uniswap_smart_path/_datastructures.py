@@ -17,7 +17,6 @@ from typing import (
 )
 
 from uniswap_universal_router_decoder import RouterCodec
-from uniswap_universal_router_decoder._encoder import PathKey
 from web3 import AsyncWeb3
 from web3.contract import AsyncContract
 from web3.exceptions import Web3Exception
@@ -31,6 +30,14 @@ from ._utilities import to_wei
 
 logger = logging.getLogger(__name__)
 codec = RouterCodec()
+
+
+class PathKey(TypedDict):
+    intermediate_currency: ChecksumAddress
+    fee: int
+    tick_spacing: int
+    hooks: ChecksumAddress
+    hook_data: bytes
 
 
 @dataclass(frozen=True)
